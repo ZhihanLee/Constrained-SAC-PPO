@@ -4,8 +4,10 @@ The basic SAC algorithm comes form ElegantRL :
 
 https://github.com/AI4Finance-Foundation/ElegantRL
 
-I established a Constrained SAC algorithm to deal with CMDP problem
+I established a Constrained SAC algorithm to deal with CMDP problem.
 
-However, I didn't use NN to Lagrangian Multiplier λ
+See 'Class AgentConstrainedSAC' in "AgentSAC.py" for details.
+
+However, I didn't use NN to update Lagrangian Multiplier λ.
 
 In the future, I will add this method.
