@@ -1,5 +1,6 @@
 from copy import deepcopy
 import sys
+
 sys.path.append('D:\\RL\\ElegantRL-master\\SAC_Prius')
 import numpy as np
 import numpy.random as rd
@@ -7,7 +8,7 @@ import torch
 
 from elegantrl.agents.AgentBase import AgentBase
 from elegantrl.agents.net import ActorSAC, CriticTwin, ShareSPG, CriticMultiple
-
+from elegantrl.train.replay_buffer import ReplayBuffer_off
 
 class AgentSAC(AgentBase):  # [ElegantRL.2021.11.11]
     """
@@ -71,7 +72,7 @@ class AgentSAC(AgentBase):  # [ElegantRL.2021.11.11]
             device=self.device,
         )  # trainable parameter
         self.alpha_optim = torch.optim.Adam((self.alpha_log,), lr=learning_rate)
-        self.target_entropy = np.log(action_dim)
+        self.target_entropy = np.log(action_dim) #  action_dim * np.log(action_dim)#
 
 
         if if_per_or_gae:  # if_use_per
@@ -302,8 +303,8 @@ class AgentModSAC(AgentSAC):  # [ElegantRL.2021.11.11]
         :param alpha: the trade-off coefficient of entropy regularization.
         :return: the loss of the network and states.
         """
-        print("===========================")
-        print("Using PER")
+        # print("===========================")
+        # print("Using PER")
         with torch.no_grad():
             # reward, mask, action, state, next_s = buffer.sample_batch(batch_size)
             reward, mask, action, state, next_s, is_weights = buffer.sample_batch(
@@ -325,11 +326,11 @@ class AgentModSAC(AgentSAC):  # [ElegantRL.2021.11.11]
             )
         q_values = self.cri.get_q_values(state, action)
 
-        print("reward shape = ", reward.shape)
-        print("next_q.shape = ", next_q.shape)
-        print("next_log_prob.shape = ", next_log_prob.shape)
-        print("q_labels = ", q_labels)
-        print("q_labels shape = ", q_labels.shape)
+        # print("reward shape = ", reward.shape)
+        # print("next_q.shape = ", next_q.shape)
+        # print("next_log_prob.shape = ", next_log_prob.shape)
+        # print("q_labels = ", q_labels)
+        # print("q_labels shape = ", q_labels.shape)
 
         # obj_critic = self.criterion(q_values, q_labels)
         td_error = self.criterion(q_values, q_labels).mean(dim=1, keepdim=True)
@@ -338,17 +339,20 @@ class AgentModSAC(AgentSAC):  # [ElegantRL.2021.11.11]
         buffer.td_error_update(td_error.detach())
         return obj_critic, state
 
-class AgentConstrainedSAC(AgentModSAC):
+class AgentConstrainedSAC_old(AgentModSAC):
     '''
     the SAC-Lagrangian method without Lagrangian multiplier updating by NN
     '''
     def __init__(self):
         AgentSAC.__init__(self)
-        self.__name__ = 'SAC'
+        self.__name__ = 'CSAC'
         self.ClassCri = CriticMultiple  # REDQ ensemble (parameter sharing)
         # self.ClassCri = CriticEnsemble  # REDQ ensemble  # todo ensemble
+        gpu_id = 0
         self.state = None
-        self.device = None
+        self.device = torch.device(
+            f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu"
+        )
         self.if_use_cri_target = True
         self.if_use_act_target = True
 
@@ -358,9 +362,9 @@ class AgentConstrainedSAC(AgentModSAC):
             np.random.rand(self.constraint_dim),
             dtype=torch.float32,
             requires_grad=True,
-            device=self.device,
+            device=self.device
         ) # shape = [1, constrain_dim, 1]
-        constraint_learning_rate = 1e-4
+        constraint_learning_rate = 0.01
 
         # constraint hyper-parameter
         d1 = 0.05 # constraint cost 1 Jc1 = Expectation(sigma t :gamma^t*ct) < d1
@@ -466,15 +470,23 @@ class AgentConstrainedSAC(AgentModSAC):
         :return: a tuple of the log information.
 
         Update the lagrangian multiplier Lambda by on-policy data from expectation_buffer and rollout_buffer 
+        
+        :param expectation_buffer: the expectation of constraint cost has been calculated in run.py
+        :param rollout_buffer: store on-policy data in current policy, it should be longer than batch_size
 
         """
         buffer.update_now_len()
-
         obj_actor = None
         update_a = 0
         alpha = None
+        Lambda = None
         for update_c in range(1, int(buffer.now_len * repeat_times / batch_size)):
             alpha = self.alpha_log.exp()
+            # # Introducing Softmax in Lambda 
+            # # cite: Direct Behavior Specification via Constrained Reinforcement Learning
+            # SoftMax_Lambda = torch.nn.functional.softmax(self.Lambda, dim=0) # softmaxize the Lambda
+            # # after softmax, there is a grad_fn=<SoftmaxBackward0> in the output data
+            # self.Lambda = SoftMax_Lambda.detach().requires_grad_(True)
             Lambda = self.Lambda
 
             """objective of critic (loss function of critic)"""
@@ -497,10 +509,14 @@ class AgentConstrainedSAC(AgentModSAC):
                 self.alpha_log[:] = self.alpha_log.clamp(-16, 2).detach()
 
             """objective of lambda"""
-            expectation_buffer = torch.as_tensor(expectation_buffer, dtype=torch.float32)
+            expectation_buffer = torch.as_tensor(expectation_buffer, dtype=torch.float32, device=self.device)
             expectation_buffer = expectation_buffer.reshape(self.constraint_dim,1)
             obj_lambda = torch.matmul(self.Lambda, expectation_buffer)  # dont need mean(), it has been taken in run.py 
             self.optim_update(self.lambda_optim, obj_lambda)
+            
+            # projection onto the dual space, making lambda >= 0
+            with torch.no_grad():
+                self.Lambda[:] = self.Lambda.clamp(0.,16.).detach()
 
             """objective of actor using reliable_lambda and TTUR (Two Time-scales Update Rule)"""
             reliable_lambda = np.exp(-self.obj_critic**2)  # for reliable_lambda
@@ -510,11 +526,11 @@ class AgentConstrainedSAC(AgentModSAC):
 
                 q_value_pg = self.cri(state, a_noise_pg)
                 obj_actor = -(q_value_pg + logprob * alpha)  # todo ensemble
-                # Adding lagrangian part
-                for i in range(self.constraint_dim):
-                    cost_list = torch.as_tensor(rollout_buffer[i]).reshape(len(rollout_buffer[i]),1)
-                    Lag = Lambda[i] * cost_list
-                    obj_actor -= Lag 
+                # # Adding lagrangian part
+                # for i in range(self.constraint_dim):
+                #     cost_list = torch.as_tensor(rollout_buffer[i],device=self.device).reshape(len(rollout_buffer[i]),1)
+                #     Lag = Lambda[i] * cost_list
+                #     obj_actor -= Lag 
                 obj_actor = obj_actor.mean()
                 self.optim_update(self.act_optim, obj_actor)
                 if self.if_use_act_target:
@@ -550,9 +566,9 @@ class AgentConstrainedSAC(AgentModSAC):
 
             # Adding lagrangian part
             for i in range(self.constraint_dim):
-                cost_list = torch.tensor(rollout_buffer[i])
+                cost_list = torch.tensor(rollout_buffer[i],device=self.device).reshape(len(rollout_buffer[i]),1)
                 Lag = Lambda[i] * cost_list
-                q_label += Lag 
+                q_label -= Lag 
 
             q_labels = q_label * torch.ones(
                 (1, self.cri.q_values_num), dtype=torch.float32, device=self.device
@@ -592,11 +608,14 @@ class AgentConstrainedSAC(AgentModSAC):
 
             q_label = reward + mask * (next_q + next_log_prob * alpha)
 
+            print(q_label)
+            print(q_label.shape)
+            
             # Adding lagrangian part
             for i in range(self.constraint_dim):
-                cost_list = torch.as_tensor(rollout_buffer[i]).reshape(len(rollout_buffer[i]),1)
+                cost_list = torch.as_tensor(rollout_buffer[i],device=self.device).reshape(len(rollout_buffer[i]),1)
                 Lag = Lambda[i] * cost_list
-                q_label += Lag 
+                q_label -= Lag 
 
             q_labels = q_label * torch.ones(
                 (1, self.cri.q_values_num), dtype=torch.float32, device=self.device
@@ -609,8 +628,363 @@ class AgentConstrainedSAC(AgentModSAC):
 
         buffer.td_error_update(td_error.detach())
         return obj_critic, state
-    
 
+class AgentConstrainedSAC(AgentModSAC):
+    '''
+    the SAC-Lagrangian method without Lagrangian multiplier updating by NN
+    '''
+    def __init__(self):
+        AgentSAC.__init__(self)
+        self.__name__ = 'CSAC'
+        self.ClassCri = CriticMultiple  # REDQ ensemble (parameter sharing)
+        # self.ClassCri = CriticEnsemble  # REDQ ensemble  # todo ensemble
+        gpu_id = 0
+        self.state = None
+        self.device = torch.device(
+            f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu"
+        )
+        self.if_use_cri_target = True
+        self.if_use_act_target = True
+
+        # Initialize Lagrangian Multiplier
+        self.constraint_dim = 2
+        self.lambda_scale = 10
+        self.Lambda = torch.tensor(
+            self.lambda_scale * np.random.rand(self.constraint_dim),
+            dtype=torch.float32,
+            requires_grad=True,
+            device=self.device
+        ) # shape = [1, constrain_dim, 1]
+        self.UPDATE_INTERVAL = 2**4
+        self.lambda_interval = 0
+        constraint_learning_rate = 0.01
+
+        # constraint hyper-parameter
+        d1 = 0.05 # constraint cost 1 Jc1 = Expectation(sigma t :gamma^t*ct) < d1
+        d2 = 0.05 # constraint cost 2
+        self.d = torch.tensor([d1, d2])
+        self.lambda_optim = torch.optim.Adam((self.Lambda,), lr=constraint_learning_rate)
+
+    def explore_one_env(self, env, target_step: int) -> list:
+        """
+        ################ A constrained explore_env method in AgentConstrainedSAC #################
+
+        actor explores in single Env, then returns the trajectory (env transitions) for ReplayBuffer
+
+        :param env: RL training environment. env.reset() env.step()
+        :param target_step: explored target_step number of step in env
+        :return: `[traj_env_0, ]`
+        `traj_env_0 = [(state, reward, mask, action, noise), ...]` for on-policy
+        `traj_env_0 = [(state, other), ...]` for off-policy
+        """
+        
+        state = env.reset()
+        traj = []
+        trajectory_list = list()
+        episode_all = 0
+        episode_all_spd = 0
+        episode_all_fuel = 0
+        episode_all_suc = 0
+        episode_all_soc = 0
+        episode_all_ill = 0
+        episode_all_pwt = 0
+        episode_all_safe = 0
+        episode_all_action = 0
+        cost_engine = 0
+
+        for _ in range(target_step):
+            ten_state = torch.as_tensor(state, dtype=torch.float32)
+            ten_action = self.select_actions(ten_state.unsqueeze(0))[0]
+            action = ten_action.numpy()
+            next_s, reward, done, info = env.step(action)
+            env.out_info(info)
+
+            ten_other = torch.empty(2 + self.action_dim + self.constraint_dim)
+            ten_other[0] = reward
+            ten_other[1] = done
+            ten_other[2:2+self.action_dim] = ten_action
+            ten_other[2+self.action_dim:] = torch.as_tensor(info['con_cost'], dtype=torch.float32, device=self.device)
+            traj.append((ten_state, ten_other))
+
+            state = env.reset() if done else next_s
+
+            # # 绘图用数据
+            episode_all += info['r']
+            episode_all_spd += info['r_moving']
+            episode_all_fuel += info['r_fuel']
+            episode_all_suc += info['r_suc']
+            episode_all_soc += info['r_soc']
+            episode_all_ill += info['r_ill']
+            episode_all_pwt += info['r_pwt']
+            episode_all_safe += info['r_safe']
+            episode_all_action += info['r_action']
+            cost_engine += info['fuel_cost_L']
+
+        # self.states[0] = state
+
+        mean_reward = episode_all/target_step
+        env.mean_reward_list.append(mean_reward)
+        mean_reward_spd = episode_all_spd/target_step
+        env.mean_spd_list.append(mean_reward_spd)
+        mean_reward_fuel = episode_all_fuel/target_step
+        env.mean_fuel_list.append(mean_reward_fuel)
+        mean_reward_suc = episode_all_suc/target_step
+        env.mean_suc_list.append(mean_reward_suc)
+        mean_reward_soc = episode_all_soc/target_step
+        env.mean_soc_list.append(mean_reward_soc)
+        mean_reward_ill = episode_all_ill/target_step
+        env.mean_ill_list.append(mean_reward_ill)
+        mean_reward_pwt = episode_all_pwt/target_step
+        env.mean_pwt_list.append(mean_reward_pwt)
+        mean_reward_safe = episode_all_safe/target_step
+        env.mean_safe_list.append(mean_reward_safe)
+        mean_reward_action = episode_all_action/target_step
+        env.mean_action_list.append(mean_reward_action)
+        print("FuelCost per 100km is :",cost_engine * 100/(env.travellength/1000))
+
+        traj_state = torch.stack([item[0] for item in traj])
+        traj_other = torch.stack([item[1] for item in traj])
+        traj_list = [
+            (traj_state, traj_other),
+        ]     
+
+        return self.convert_trajectory(traj_list)  # [traj_env_0, ]
+
+    def update_net(self, buffer, batch_size, repeat_times, soft_update_tau): # off-policy update
+        """
+        Update the neural networks by sampling batch data from ``ReplayBuffer``.
+
+        :param buffer: the ReplayBuffer instance that stores the trajectories.
+        :param batch_size: the size of batch data for Stochastic Gradient Descent (SGD).
+        :param repeat_times: the re-using times of each trajectory.
+        :param soft_update_tau: the soft update parameter.
+        :return: a tuple of the log information.
+        """
+        buffer.update_now_len()
+        obj_actor = None
+        update_a = 0
+        alpha = None
+        Lambda = None
+        for update_c in range(1, int(buffer.now_len * repeat_times / batch_size)):
+            alpha = self.alpha_log.exp()
+            # # Introducing Softmax in Lambda 
+            # # cite: Direct Behavior Specification via Constrained Reinforcement Learning
+            # SoftMax_Lambda = torch.nn.functional.softmax(self.Lambda, dim=0) # softmaxize the Lambda
+            # # after softmax, there is a grad_fn=<SoftmaxBackward0> in the output data
+            # self.Lambda = SoftMax_Lambda.detach().requires_grad_(True)
+            Lambda = self.Lambda
+
+            """objective of critic (loss function of critic)"""
+            obj_critic, state = self.get_obj_critic(buffer, batch_size, alpha, Lambda)
+            self.obj_critic = (
+                0.995 * self.obj_critic + 0.005 * obj_critic.item()
+            )  # for reliable_lambda
+            self.optim_update(self.cri_optim, obj_critic)
+            if self.if_use_cri_target:
+                self.soft_update(self.cri_target, self.cri, soft_update_tau)
+
+            a_noise_pg, logprob = self.act.get_action_logprob(state)  # policy gradient
+
+            """objective of alpha (temperature parameter automatic adjustment)"""
+            obj_alpha = (
+                self.alpha_log * (logprob - self.target_entropy).detach()
+            ).mean()
+            self.optim_update(self.alpha_optim, obj_alpha)
+            with torch.no_grad():
+                self.alpha_log[:] = self.alpha_log.clamp(-16, 2).detach()
+
+            """objective of actor using reliable_lambda and TTUR (Two Time-scales Update Rule)"""
+            reliable_lambda = np.exp(-self.obj_critic**2)  # for reliable_lambda
+            if_update_a = update_a / update_c < 1 / (2 - reliable_lambda)
+            if if_update_a:  # auto TTUR
+                update_a += 1
+
+                q_value_pg = self.cri(state, a_noise_pg)
+                obj_actor = -(q_value_pg + logprob * alpha)  # todo ensemble
+                # # For safe RL without safety critic network, it is unnecessary to add cost in actor loss
+                # # Adding lagrangian part
+                # for i in range(self.constraint_dim):
+                #     cost_list = torch.as_tensor(rollout_buffer[i],device=self.device).reshape(len(rollout_buffer[i]),1)
+                #     Lag = Lambda[i] * cost_list
+                #     obj_actor -= Lag 
+                obj_actor = obj_actor.mean()
+                self.optim_update(self.act_optim, obj_actor)
+                if self.if_use_act_target:
+                    self.soft_update(self.act_target, self.act, soft_update_tau)
+
+        return self.obj_critic, obj_actor.item(), alpha.item()
+
+    def update_lambda(self, env, target_step: int, batch_size, rollout_time): # on-policy update
+        '''
+        Update the lagrangian multiplier Lambda by on-policy strategy with rollout method 
+        
+        '''
+        
+        '''
+        create a on_policy data buffer with the size of serval times rollout
+        keep buffer structure, for safety critric network in the future
+        '''
+        
+        self.lambda_interval += 1 # delayed update
+        
+        if self.lambda_interval == self.UPDATE_INTERVAL :
+            on_policy_buf = ReplayBuffer_off(gpu_id=0, 
+                                            max_len=target_step*rollout_time,
+                                            state_dim=env.s_dim,
+                                            action_dim=env.a_dim,
+                                            constraint_dim=self.constraint_dim
+                                            )
+            expectation_buffer = []
+            print("Rollout for on-policy data")
+            for i in range(rollout_time) :
+                rollout_tra = self.explore_one_env(env, target_step)
+                steps, r_exp = on_policy_buf.update_buffer(rollout_tra)
+                
+            '''
+            calculate cost for each dimension
+            '''  
+            # sample from on-policy buffer
+            
+            on_policy_buf.update_now_len()
+            reward, mask, action_cost, state, next_s = on_policy_buf.sample_batch(batch_size)
+            action = action_cost[:,0:3] # action_dim = 3
+            cost = action_cost[:,3:]
+            
+            for i in range(self.constraint_dim) :
+                J_c_i = (self.d[i] - cost[:,i]).mean()
+                expectation_buffer.append(J_c_i)
+            
+            """objective of lambda"""
+            expectation_buffer = torch.as_tensor(expectation_buffer, dtype=torch.float32, device=self.device)
+            expectation_buffer = expectation_buffer.reshape(self.constraint_dim,1)
+            obj_lambda = torch.matmul(self.Lambda, expectation_buffer)  # dont need mean(), it has been taken in run.py 
+            self.optim_update(self.lambda_optim, obj_lambda)
+            
+            # projection onto the dual space, making lambda >= 0
+            with torch.no_grad():
+                self.Lambda[:] = self.Lambda.clamp(0.,16.).detach()
+                
+            self.lambda_interval = 0
+   
+    def get_obj_critic_raw(self, buffer, batch_size, alpha, Lambda):
+        """
+        Modified Q value computation with lagrangian multiplier
+
+        Calculate the loss of networks with **uniform sampling**.
+
+        :param buffer: the ReplayBuffer instance that stores the trajectories.
+        :param batch_size: the size of batch data for Stochastic Gradient Descent (SGD).
+        :param alpha: the trade-off coefficient of entropy regularization.
+        :return: the loss of the network and states.
+        """
+        with torch.no_grad():
+            reward, mask, action_cost, state, next_s = buffer.sample_batch(batch_size)
+            action = action_cost[:,0:3] # action_dim = 3
+            cost = action_cost[:,3:]
+
+            next_a, next_log_prob = self.act_target.get_action_logprob(
+                next_s
+            )  # stochastic policy
+            next_q = torch.min(
+                self.cri_target.get_q_values(next_s, next_a), dim=1, keepdim=True
+            )[
+                0
+            ]  # multiple critics
+
+            # todo ensemble
+            q_label = reward + mask * (next_q + next_log_prob * alpha) # torch.size is [batch_size, 1], a column
+
+            # Adding lagrangian part
+            for i in range(self.constraint_dim):
+                Lag = Lambda[i] * cost[:,i]
+                Lag = Lag.reshape(len(cost[:,i]),1)
+                '''
+                formulation cite : Constrained Soft Actor-Critic for Energy-Aware Trajectory Design in UAV-Aided IoT Networks
+                page3 formulation (5)
+                '''
+                q_label -= Lag 
+
+            q_labels = q_label * torch.ones(
+                (1, self.cri.q_values_num), dtype=torch.float32, device=self.device
+            )
+        q_values = self.cri.get_q_values(state, action)  # todo ensemble
+
+        obj_critic = self.criterion(q_values, q_labels)
+        return obj_critic, state
+
+    def get_obj_critic_per(self, buffer, batch_size, alpha, Lambda):
+        """
+        Modified Q value computation with lagrangian multiplier
+
+        rollout_buffer is a [[con_cost1 list], [con_cost2 list]], using constraint_dim to visit different cost list
+
+        Calculate the loss of the network with **Prioritized Experience Replay (PER)**.
+
+        :param buffer: the ReplayBuffer instance that stores the trajectories.
+        :param batch_size: the size of batch data for Stochastic Gradient Descent (SGD).
+        :param alpha: the trade-off coefficient of entropy regularization.
+        :return: the loss of the network and states.
+        """
+        with torch.no_grad():
+            # reward, mask, action, state, next_s = buffer.sample_batch(batch_size)
+            reward, mask, action_cost, state, next_s, is_weights = buffer.sample_batch(batch_size)
+            # action_cost is a tensor with [batch_size, action_dim + constraint_dim]
+            action = action_cost[:,0:3] # action_dim = 3
+            cost = action_cost[:,3:]
+
+            next_a, next_log_prob = self.act_target.get_action_logprob(
+                next_s
+            )  # stochastic policy
+            next_q = torch.min(
+                self.cri_target.get_q_values(next_s, next_a), dim=1, keepdim=True
+            )[
+                0
+            ]  # multiple critics
+
+            q_label = reward + mask * (next_q + next_log_prob * alpha) # torch.size is [batch_size, 1], a column
+
+            # Adding lagrangian part
+            '''
+            Without extra safety critic network, add off-policy cost data in origin critic loss
+            '''
+            for i in range(self.constraint_dim):
+                Lag = Lambda[i] * cost[:,i]
+                Lag = Lag.reshape(len(cost[:,i]),1)
+                '''
+                formulation cite : Constrained Soft Actor-Critic for Energy-Aware Trajectory Design in UAV-Aided IoT Networks
+                page3 formulation (5)
+                '''
+                q_label -= Lag 
+
+            q_labels = q_label * torch.ones(
+                (1, self.cri.q_values_num), dtype=torch.float32, device=self.device
+            )
+        q_values = self.cri.get_q_values(state, action)
+
+        # obj_critic = self.criterion(q_values, q_labels)
+        td_error = self.criterion(q_values, q_labels).mean(dim=1, keepdim=True)
+        obj_critic = (td_error * is_weights).mean()
+
+        buffer.td_error_update(td_error.detach())
+        return obj_critic, state
+
+class AgentConstrainedSACv2(AgentConstrainedSAC):
+    def __init__(self):
+        AgentSAC.__init__(self)
+        self.__name__ = 'C-SAC-with-NN'
+        self.ClassCri = CriticMultiple  # REDQ ensemble (parameter sharing)
+        self.ClassCri_safety = CriticMultiple
+        # self.ClassCri = CriticEnsemble  # REDQ ensemble  # todo ensemble
+        gpu_id = 0
+        self.state = None
+        self.device = torch.device(
+            f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu"
+        )
+        self.if_use_cri_target = True
+        self.if_use_act_target = True
+        
+        
+        
 class AgentShareSAC(AgentSAC):  # Integrated Soft Actor-Critic
     def __init__(self):
         AgentSAC.__init__(self)
