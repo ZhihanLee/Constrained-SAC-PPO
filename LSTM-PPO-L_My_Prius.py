@@ -1,9 +1,7 @@
 import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
 import sys
 import time
 from copy import deepcopy
-from turtle import goto
 
 import gym
 import torch
@@ -15,11 +13,6 @@ import numpy.random as rd
 import matplotlib
 matplotlib.use('agg') 
 import matplotlib.pyplot as plt
-
-"""
-cancel prepare_buffer
-move env.last_state to buffer.last_state
-"""
 
 is_training = True
 
@@ -82,11 +75,6 @@ class ActorPPO(nn.Module):
 
         dist_entropy = (logprob.exp() * logprob).mean()  # policy entropy
 
-        ## PPO-RNN sjtu PPO : didnt work, dont know how
-        # dist_now = Categorical(logits=a_avg)
-        # dist_entropy = dist_now.entropy()  
-        # logprob = dist_now.log_prob(a_avg) 
-       
         return logprob, dist_entropy # should be [batch_size, sequence_length]
 
     def get_old_logprob(self, _action, noise):  # noise = action - a_noise
@@ -194,7 +182,6 @@ class AgentPPO_L:
         return actions[0].detach().cpu().numpy(), noises[0].detach().cpu().numpy()
 
     def explore_env(self, env, target_step, reward_scale, gamma):
-        # # episode范围下，变量必要初始化
         trajectory_list = list()
         episode_all = 0
         episode_all_spd = 0
@@ -206,23 +193,15 @@ class AgentPPO_L:
         episode_all_safe = 0
         episode_all_action = 0
         cost_engine = 0
-        # print('=========debug========')
-        # print('self.state = ',self.state)
-        # # 原版
-        # state = self.state
-        # # 修改
         state = env.reset()
         for _ in range(target_step):
             action, noise = self.select_action(state)
             next_state, reward, done, info = env.step(np.tanh(action))
-            # 写数据到list里面
             env.out_info(info)
             other = (reward * reward_scale, 0.0 if done else gamma, *action, *noise, info['con_cost'][0], info['con_cost'][1]) # need perfection
             trajectory_list.append((state, other))
             state = next_state
-            # state = env.reset() if done else next_state
 
-            # # 绘图用数据
             episode_all += info['r']
             episode_all_spd += info['r_moving']
             episode_all_fuel += info['r_fuel']
@@ -233,8 +212,7 @@ class AgentPPO_L:
             episode_all_safe += info['r_safe']
             episode_all_action += info['r_action']
             cost_engine += info['fuel_cost_L']
-        # 原版
-        # self.state = state
+
         final_state_list = np.array([item[0] for item in trajectory_list], dtype=np.float32)
         final_state_list = final_state_list[::-1] # reverse
         self.state = final_state_list[:self.sequence_length,:]
@@ -796,51 +774,6 @@ def train_and_evaluate(args):
         if episode_num%10 == 0 :
             env.write_info(episode_num, is_training = True)
 
-        # 绿波任务成功画图
-        if env.GLOSA == 1 :
-            if len(glosa_list) < 10 :
-                # 绿波次数不多，先存着
-                glosa_list.append(episode_num)
-                print("绿波通过成功，绘制轨迹")
-                env.render(episode_num, is_training = True)
-            else :
-                if episode_num > glosa_list[len(glosa_list)-1] + 15 :
-                    glosa_list.append(episode_num)
-                    print("绿波通过成功，绘制轨迹")
-                    env.render(episode_num, is_training = True)
-
-        # 按一定episode间隔画SOC、reward和运行状态图
-        if total_step % (50*target_step) == 0:
-            # 每50episode画图一次
-            print('调用render')
-            env.render(episode_num, is_training = True)
-
-            # 绘制lambda变化
-            print('Drawing lambda')
-            plot_x = [i for i in range(episode_num)]
-            # # multiple lambda :
-            # plot_y_1 = lambda_list_1
-            # plot_y_2 = lambda_list_2
-            # line_cost_1, = plt.plot(plot_x, plot_y_1)
-            # line_cost_2, = plt.plot(plot_x, plot_y_2)
-            # plt.xlabel("Episode")
-            # plt.ylabel("Lambda")
-            # plt.legend([line_cost_1, line_cost_2], ['pwt_dym_cost', 'bat_cost'])
-            
-            # # single lambda
-            plot_y = lambda_list
-            line_lambda = plt.plot(plot_x, plot_y)
-            plt.xlabel("Episode")
-            plt.ylabel("Lambda")
-            plt.legend([line_lambda], ['lambda'])
-
-            picname = '/root/autodl-tmp/PPO-L/Result' + "Lambda" +\
-                        str(episode_num) + ".png"
-            plt.savefig(picname, dpi = 500, bbox_inches='tight')
-            plt.tight_layout()
-            plt.close('all')
-            
-    # 记录本次训练的全部reward数据
     env.write_mean_reward()
     print(f'| UsedTime: {time.time() - evaluator.start_time:.0f} | SavedDir: {cwd}')
     print("Finish Time:", time.strftime("%Y-%m-%d %X",time.localtime()))
@@ -874,10 +807,8 @@ class Evaluator:
         if time.time() - self.eval_time > self.eval_gap:
             self.eval_time = time.time()
             if_reach_goal = False
-            # 检查绿波性能，如果没有，则放弃模型保存
             episode_return, episode_step = get_episode_return_and_step(self.env, act, self.device)
             if episode_step == self.env.max_step :
-                # 用一个list来容纳循环，是为了在evaluate的时候多测试几次取平均值，也就是说当前阶段的智能体被评估了eval_times1次
                 rewards_steps_list = [get_episode_return_and_step(self.env, act, self.device) for _ in
                                         range(self.eval_times1)]
                 r_avg, r_std, s_avg, s_std = self.get_r_avg_std_s_avg_std(rewards_steps_list)
@@ -941,11 +872,8 @@ def get_episode_return_and_step(env, act, device) -> (float, int):
         episode_return += reward
         if done:
             break
-    # 测试结束后绿波结果验证
     GLOSA = env.GLOSA
     episode_step = GLOSA + episode_step
-    # 验证结束，记录到了episode_step变量中
-    # 注解：此操作相当于增加了校验过程中的step数，对于回合内step不固定的任务来说是有影响的，但是对固定步数的任务来说，评价平均step无意义，所以可以修改
     episode_return = getattr(env, 'episode_return', episode_return)
     return episode_return, episode_step
 
@@ -965,50 +893,11 @@ def demo_continuous_action():
     args.agent.cri_target = True  # True
     args.target_step = int(env.travellength/env.STEP_SIZE)
 
-    # # init agent parameter
-    # args.agent.init(2**8, env.s_dim, env.a_dim) # this procesure is in train_and_evaluate()
-
-    # '''choose environment'''
-    # if_train_pendulum = 0
-    # if if_train_pendulum:
-    #     "TotalStep: 4e5, TargetReward: -200, UsedTime: 400s"
-    #     args.env = PreprocessEnv(env='Pendulum-v0')
-    #     args.env.target_return = -200  # set target_reward manually for env 'Pendulum-v0'
-    #     args.reward_scale = 2 ** -3  # RewardRange: -1800 < -200 < -50 < 0
-    #     args.net_dim = 2 ** 7
-    #     args.batch_size = args.net_dim * 2
-    #     args.target_step = args.env.max_step * 16
-    #     args.break_step = int(8e5 * 8)
-    #     args.gpu_id = sys.argv[-1][-4]
-    #     args.random_seed = 1423
-
-    #     args.eval_gap = 2 ** 7
-    #     args.eval_times1 = 2
-    #     args.eval_times2 = 4
-
-    # if_train_lunar_lander = 1
-    # if if_train_lunar_lander:
-    #     "TotalStep: 4e5, TargetReward: 200, UsedTime: 900s"
-    #     args.env = PreprocessEnv(env=gym.make('LunarLanderContinuous-v2'))
-    #     args.reward_scale = 2 ** 0  # RewardRange: -800 < -200 < 200 < 302
-
-    # if_train_bipedal_walker = 0
-    # if if_train_bipedal_walker:
-    #     "TotalStep: 8e5, TargetReward: 300, UsedTime: 1800s"
-    #     args.env = PreprocessEnv(env=gym.make('BipedalWalker-v3'))
-    #     args.reward_scale = 2 ** 0  # RewardRange: -200 < -150 < 300 < 334
-    #     args.gamma = 0.97
-    #     args.if_per_or_gae = True
-
     '''train and evaluate'''
     if is_training:
         train_and_evaluate(args) # there is a while loop in it
     else:
-        print("hhhh测试")
-
-
+        pass
 
 if __name__ == '__main__':
     demo_continuous_action()
-    # demo_discrete_action()
-    # demo_get_video_to_watch_gym_render()
