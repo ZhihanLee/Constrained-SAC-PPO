@@ -182,62 +182,64 @@ class AgentPPO_L:
         return actions[0].detach().cpu().numpy(), noises[0].detach().cpu().numpy()
 
     def explore_env(self, env, target_step, reward_scale, gamma):
-        trajectory_list = list()
-        episode_all = 0
-        episode_all_spd = 0
-        episode_all_fuel = 0
-        episode_all_suc = 0
-        episode_all_soc = 0
-        episode_all_ill = 0
-        episode_all_pwt = 0
-        episode_all_safe = 0
-        episode_all_action = 0
-        cost_engine = 0
-        state = env.reset()
-        for _ in range(target_step):
-            action, noise = self.select_action(state)
-            next_state, reward, done, info = env.step(np.tanh(action))
-            env.out_info(info)
-            other = (reward * reward_scale, 0.0 if done else gamma, *action, *noise, info['con_cost'][0], info['con_cost'][1]) # need perfection
-            trajectory_list.append((state, other))
-            state = next_state
+        ##### edit this according to your own enviroment #####
+#         trajectory_list = list()
+#         episode_all = 0
+#         episode_all_spd = 0
+#         episode_all_fuel = 0
+#         episode_all_suc = 0
+#         episode_all_soc = 0
+#         episode_all_ill = 0
+#         episode_all_pwt = 0
+#         episode_all_safe = 0
+#         episode_all_action = 0
+#         cost_engine = 0
+#         state = env.reset()
+#         for _ in range(target_step):
+#             action, noise = self.select_action(state)
+#             next_state, reward, done, info = env.step(np.tanh(action))
+#             env.out_info(info)
+#             other = (reward * reward_scale, 0.0 if done else gamma, *action, *noise, info['con_cost'][0], info['con_cost'][1]) # need perfection
+#             trajectory_list.append((state, other))
+#             state = next_state
 
-            episode_all += info['r']
-            episode_all_spd += info['r_moving']
-            episode_all_fuel += info['r_fuel']
-            episode_all_suc += info['r_suc']
-            episode_all_soc += info['r_soc']
-            episode_all_ill += info['r_ill']
-            episode_all_pwt += info['r_pwt']
-            episode_all_safe += info['r_safe']
-            episode_all_action += info['r_action']
-            cost_engine += info['fuel_cost_L']
+#             episode_all += info['r']
+#             episode_all_spd += info['r_moving']
+#             episode_all_fuel += info['r_fuel']
+#             episode_all_suc += info['r_suc']
+#             episode_all_soc += info['r_soc']
+#             episode_all_ill += info['r_ill']
+#             episode_all_pwt += info['r_pwt']
+#             episode_all_safe += info['r_safe']
+#             episode_all_action += info['r_action']
+#             cost_engine += info['fuel_cost_L']
 
-        final_state_list = np.array([item[0] for item in trajectory_list], dtype=np.float32)
-        final_state_list = final_state_list[::-1] # reverse
-        self.state = final_state_list[:self.sequence_length,:]
+#         final_state_list = np.array([item[0] for item in trajectory_list], dtype=np.float32)
+#         final_state_list = final_state_list[::-1] # reverse
+#         self.state = final_state_list[:self.sequence_length,:]
 
-        mean_reward = episode_all/target_step
-        env.mean_reward_list.append(mean_reward)
-        mean_reward_spd = episode_all_spd/target_step
-        env.mean_spd_list.append(mean_reward_spd)
-        mean_reward_fuel = episode_all_fuel/target_step
-        env.mean_fuel_list.append(mean_reward_fuel)
-        mean_reward_suc = episode_all_suc/target_step
-        env.mean_suc_list.append(mean_reward_suc)
-        mean_reward_soc = episode_all_soc/target_step
-        env.mean_soc_list.append(mean_reward_soc)
-        mean_reward_ill = episode_all_ill/target_step
-        env.mean_ill_list.append(mean_reward_ill)
-        mean_reward_pwt = episode_all_pwt/target_step
-        env.mean_pwt_list.append(mean_reward_pwt)
-        mean_reward_safe = episode_all_safe/target_step
-        env.mean_safe_list.append(mean_reward_safe)
-        mean_reward_action = episode_all_action/target_step
-        env.mean_action_list.append(mean_reward_action)
-        print("FuelCost per 100km is :",cost_engine * 100/(env.travellength/1000))
+#         mean_reward = episode_all/target_step
+#         env.mean_reward_list.append(mean_reward)
+#         mean_reward_spd = episode_all_spd/target_step
+#         env.mean_spd_list.append(mean_reward_spd)
+#         mean_reward_fuel = episode_all_fuel/target_step
+#         env.mean_fuel_list.append(mean_reward_fuel)
+#         mean_reward_suc = episode_all_suc/target_step
+#         env.mean_suc_list.append(mean_reward_suc)
+#         mean_reward_soc = episode_all_soc/target_step
+#         env.mean_soc_list.append(mean_reward_soc)
+#         mean_reward_ill = episode_all_ill/target_step
+#         env.mean_ill_list.append(mean_reward_ill)
+#         mean_reward_pwt = episode_all_pwt/target_step
+#         env.mean_pwt_list.append(mean_reward_pwt)
+#         mean_reward_safe = episode_all_safe/target_step
+#         env.mean_safe_list.append(mean_reward_safe)
+#         mean_reward_action = episode_all_action/target_step
+#         env.mean_action_list.append(mean_reward_action)
+#         print("FuelCost per 100km is :",cost_engine * 100/(env.travellength/1000))
 
-        return trajectory_list
+#         return trajectory_list
+        pass
 
     def update_net(self, buffer, batch_size, repeat_times, soft_update_tau, eps_step):
         buffer.update_now_len()
