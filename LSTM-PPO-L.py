@@ -866,7 +866,9 @@ def get_episode_return_and_step(env, act, device) -> (float, int):
     state = env.reset()
     for episode_step in range(max_step):
         s_tensor = torch.as_tensor((state,), device=device)
+        s_tensor = s_tensor.unsqueeze(0)
         a_tensor = act(s_tensor)
+        a_tensor= a_tensor.squeeze(0)
         if if_discrete:
             a_tensor = a_tensor.argmax(dim=1)
         action = a_tensor.detach().cpu().numpy()[0]  # not need detach(), because with torch.no_grad() outside
