@@ -13,4 +13,6 @@ log 22.7.8: Detach update lambda from update_net method
 
 log 22.7.30: A pytorch implementation of Proximal Policy Optimization with Lagranian (PPO-L) will be released soon
 
-log 23.1.3: Add a pytorch implementation for PPO-Lagrangian with LSTM, see details in LSTM-PPO-L.py
+log 23.1.3: Add a pytorch implementation for **PPO-Lagrangian with LSTM**, see details in LSTM-PPO-L.py
+![示例](https://github.com/ZhihanLee/Constrained-SAC-PPO/blob/main/LSTM-PPO-L.svg)
+
